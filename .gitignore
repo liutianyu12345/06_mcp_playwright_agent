@@ -1,1 +1,80 @@
+# 项目手册（按需保留；若不希望忽略 README，请删除本行）
 /README.md
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== 依赖与工具缓存 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+
+# ===== 环境变量与密钥 =====
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# ===== 数据库与持久化 =====
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-journal
+*-wal
+*-shm
+agent_checkpoints.sqlite*
+
+# ===== Playwright 运行产物 =====
+.ms-playwright/
+playwright-report/
+test-results/
+*.trace.zip
+*.webm
+screenshots/
+traces/
+
+# ===== 日志与临时文件 =====
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+
+# ===== Node / 前端构建（如后续引入） =====
+node_modules/
+*.lock.tmp
+.npm/
+.pnpm-store/
+vite.config.local.*
+
+# ===== 编辑器与操作系统 =====
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+desktop.ini
