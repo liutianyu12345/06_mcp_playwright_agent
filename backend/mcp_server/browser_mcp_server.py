@@ -86,6 +86,28 @@ async def browser_click(som_id: int) -> str:
             f"❌ 点击编号 [{som_id}] 失败！错误原因: {str(e)}\n"
             f"请检查是否有弹窗遮挡或元素已刷新。当前最新 DOM：\n{latest_dom}"
         )
+@mcp.tool()
+async def browser_fill(som_id: int,text: str,press_enter:bool = True) -> str:
+    """
+    在指定编号的输入框中输入文本。
+    :param som_id: 输入框的数字编号
+    :param text: 要输入的文字内容
+    :param press_enter: 输入后是否直接按回车键提交
+    """
+    page = await get_page()
+    selector = f'[data-mcp-id="{som_id}"]'
+    try:
+        await page.fill(selector, text, timeout=5000)
+        if press_enter:
+            await page.press(selector, "Enter")
+        await page.wait_for_timeout(1200)
+        dom_info = await distill_current_page(page)
+        return (
+            f"✅ 已在 [{som_id}] 输入 '{text}'。\n"
+            f"当前页面最新 DOM：\n{dom_info['distilledDOM']}"
+        )
+    except Exception as e:
+        return f"❌ 输入失败！错误原因: {str(e)}"
 
 @mcp.tool()
 async def browser_scroll(direction: str) -> str:
