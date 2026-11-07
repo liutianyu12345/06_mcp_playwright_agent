@@ -21,7 +21,7 @@ async def get_page() -> Page:
     if _page is None:
         _playwright = await async_playwright().start()
         # headless = True 为无头模式;调试时可改为False 亲眼看浏览器自己动！
-        _browser = await _playwright.chromium.launch(headless=True)
+        _browser = await _playwright.chromium.launch(headless=False)
         context = await _browser.new_context(viewport={"width": 1280, "height": 800})
         _page = await context.new_page()
     return _page

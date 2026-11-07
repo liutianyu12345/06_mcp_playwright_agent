@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import sys
 import traceback
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -10,6 +12,16 @@ from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from backend.agent.graph import build_browser_agent_graph
 
 load_dotenv()
+
+
+def proactor_loop_factory():
+    """Windows 下 Playwright 启动浏览器子进程必须用 ProactorEventLoop。
+    uvicorn 带 --reload/--workers 时会默认切到 SelectorEventLoop，需要显式指定：
+    uvicorn backend.main:app --reload --loop backend.main:proactor_loop_factory
+    """
+    if sys.platform == "win32":
+        return asyncio.ProactorEventLoop()
+    return asyncio.SelectorEventLoop()
 
 app = FastAPI(title = "MCP + Playwright GUI Agent API")
 # 配置 CORS 中间件，允许所有来源的请求
