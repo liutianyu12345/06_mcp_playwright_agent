@@ -5,18 +5,27 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage,HumanMessage
 from langgraph.graph import StateGraph,END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.config import get_stream_writer
 
 from backend.agent.state import AgentState
 from backend.mcp_server.browser_mcp_server import (
+    HUMAN_VERIFY_MARKER,
+    HEADLESS,
     browser_navigate,
     browser_click,
     browser_fill,
     browser_scroll,
     browser_screenshot,
+    get_page,
+    verification_brief,
+    wait_for_human_verification,
 )
 
 #读取项目根目录下的 .env
 load_dotenv()
+
+#连续失败阈值（可从 .env 调整，避免死循环消耗 Token）
+MAX_ERROR_COUNT = int(os.getenv("MAX_ERROR_COUNT", "3"))
 
 #初始化支持Function Calling 的大模型
 llm = ChatOpenAI(
@@ -115,12 +124,20 @@ async def actor_node(state: AgentState) -> dict:
             action_result = await tool_fn(**tool_args)
 
     #动作执行后，顺手抓一张带红框标记的实时截图
-    screenshot = await browser_screenshot()
+    #浏览器可能被人工关闭，截图失败不应中断整个任务
+    try:
+        screenshot = await browser_screenshot()
+    except Exception:
+        screenshot = None
+
+    #工具结果带有人机验证标记时，交给 Critic 路由到人工介入节点（不当作普通报错）
+    needs_human_verify = HUMAN_VERIFY_MARKER in action_result
 
     return {
         "last_action_result": action_result,
         "dom_snapshot": action_result,
         "screenshot_b64": screenshot,
+        "needs_human_verify": needs_human_verify,
         "thought_trace": [thought],
     }
 
@@ -136,6 +153,11 @@ async def critic_node(state: AgentState) -> dict:
     last_res = state.get("last_action_result", "")
     idx = state["current_step_idx"]
     steps = state["plan_steps"]
+
+    #情况0：页面命中人机验证，转交人工介入节点暂停等待（不计入错误次数）
+    if state.get("needs_human_verify", False):
+        thought = "🔍 [Critic] 页面出现人机验证拦截，转交人工验证节点暂停处理。"
+        return {"thought_trace": [thought]}
 
     #情况A：检测到工具执行报错（例如弹窗遮挡、超时、选择器失效）
     #“未调用工具”说明模型跳过了页面操作，同样视为失败，避免子目标被空转判为通过
@@ -171,16 +193,113 @@ async def critic_node(state: AgentState) -> dict:
         "thought_trace": [thought],
     }
 
+# ==================== 节点 4：Human（人机验证人工介入） ====================
+async def human_intervention_node(state: AgentState) -> dict:
+    """
+    页面出现 CAPTCHA / Cloudflare 挑战 / 滑块时暂停自动操作：
+    1. 先通过 custom 流把「等待人工验证」和当前画面推给前端；
+    2. 轮询页面直到验证消失（人工在可见浏览器里完成后自动继续）；
+    3. 超时则计入一次失败，交给 Planner 重新规划。
+    """
+    writer = get_stream_writer()
+
+    #无头模式人工看不到界面，无法完成验证，直接给出明确指引
+    if HEADLESS:
+        thought = (
+            "⏸ [Human] 检测到人机验证，但当前浏览器为无头模式，人工无法完成验证。"
+            "请在 .env 中设置 BROWSER_HEADLESS=false 后重启服务。"
+        )
+        writer({"node": "human_intervention", "thought": thought, "human_verification": True})
+        return {
+            "last_action_result": "❌ 人机验证无法在无头模式完成，请设置 BROWSER_HEADLESS=false 后重试。",
+            "needs_human_verify": False,
+            "needs_replan": True,
+            "error_count": state.get("error_count", 0) + 1,
+            "thought_trace": [thought],
+        }
+
+    page = await get_page()
+    try:
+        start_shot = await browser_screenshot()
+    except Exception:
+        start_shot = None
+
+    thought = (
+        "⏸ [Human] 检测到人机验证（CAPTCHA/Cloudflare/滑块），Agent 已暂停。"
+        "请在浏览器窗口中手动完成验证，通过后会自动继续。"
+    )
+    #先推一条事件，避免前端在长达数分钟的等待里毫无反馈
+    writer({
+        "node": "human_intervention",
+        "thought": thought,
+        "screenshot": start_shot,
+        "human_verification": True,
+    })
+
+    async def on_progress(dom_info, elapsed_seconds, reasons):
+        writer({
+            "node": "human_intervention",
+            "thought": (
+                f"⏳ [Human] 仍在等待人工验证（已等待 {elapsed_seconds} 秒）："
+                f"{verification_brief(dom_info)}"
+            ),
+            "human_verification": True,
+        })
+
+    result = await wait_for_human_verification(page, on_progress=on_progress)
+    waited = result["waited_seconds"]
+
+    #验证通过：重置错误计数，并让 Planner 基于最新页面重新规划剩余步骤
+    if result["resolved"]:
+        dom_info = result["dom_info"] or {}
+        try:
+            latest_shot = await browser_screenshot()
+        except Exception:
+            latest_shot = None
+        thought = f"✅ [Human] 人机验证已通过（等待 {waited} 秒），恢复自动执行。"
+        return {
+            "last_action_result": (
+                "✅ 人工验证已完成，页面已恢复可操作。\n"
+                f"当前页面：{dom_info.get('title', '')} ({dom_info.get('url', '')})\n"
+                f"{dom_info.get('distilledDOM', '')}"
+            ),
+            "dom_snapshot": dom_info.get("distilledDOM", ""),
+            "screenshot_b64": latest_shot,
+            "needs_human_verify": False,
+            "needs_replan": True,
+            "error_count": 0,
+            "thought_trace": [thought],
+        }
+
+    #等待超时：仍无法通过验证，计入一次失败
+    thought = (
+        f"⌛ [Human] 等待人工验证超时（{waited} 秒），"
+        f"仍检测到：{verification_brief(result['dom_info'])}"
+    )
+    return {
+        "last_action_result": (
+            f"❌ 人机验证等待超时（{waited} 秒），页面仍未放行。"
+            "请人工在浏览器中完成验证后重试。"
+        ),
+        "needs_human_verify": False,
+        "needs_replan": True,
+        "error_count": state.get("error_count", 0) + 1,
+        "thought_trace": [thought],
+    }
+
 # ==================== 条件边路由函数 (Conditional Edges) ====================
 def critic_router(state: AgentState) -> str:
     """
     决定 Critic 校验之后的流向
     """
-    #超过3次连续报错，强制终止避免无限消耗Token
-    if state.get("error_count", 0) >= 3:
-        return "end"
     # 完成全部任务 -> 结束
     if state.get("is_completed", False):
+        return "end"
+    # 命中人机验证 -> 转交人工介入节点
+    if state.get("needs_human_verify", False):
+        return "human_verify"
+    #超过 MAX_ERROR_COUNT 次连续报错，强制终止避免无限消耗Token
+    if state.get("error_count", 0) >= MAX_ERROR_COUNT:
         return "end"
     # 遇到弹窗遮挡或报错 -> 回到 Planner 重新规划（动态自愈核心！）
     if state.get("needs_replan", False):
@@ -188,28 +307,47 @@ def critic_router(state: AgentState) -> str:
     # 正常推进 -> 继续让 Actor 执行下一个子步骤
     return "next_action"
 
+
+def human_router(state: AgentState) -> str:
+    """人工介入结束后的流向：超时且失败次数达到阈值则结束，否则回到 Planner 重规划"""
+    if state.get("error_count", 0) >= MAX_ERROR_COUNT:
+        return "end"
+    return "replan"
+
 # ==================== 构建并编译 StateGraph ====================
 def build_browser_agent_graph(checkpointer: AsyncSqliteSaver):
     workflow = StateGraph(AgentState)
 
-    #注册三个核心智能体节点
+    #注册核心智能体节点（含人机验证人工介入节点）
     workflow.add_node("planner", planner_node)
     workflow.add_node("actor", actor_node)
     workflow.add_node("critic", critic_node)
+    workflow.add_node("human_intervention", human_intervention_node)
 
     #设置入口与普通边
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "actor")
     workflow.add_edge("actor", "critic")
 
-    #设置Critic的条件边（自愈循环的关键）
+    #设置Critic的条件边（自愈循环 + 人机验证转人工的关键）
     workflow.add_conditional_edges(
         "critic",
         critic_router,
         {
-            "replan": "planner",      # 异常自愈：回退给 Planner
-            "next_action": "actor",   # 正常步进：继续调用 Actor
-            "end": END,               # 任务完成或熔断：结束图循环
+            "replan": "planner",                # 异常自愈：回退给 Planner
+            "next_action": "actor",             # 正常步进：继续调用 Actor
+            "human_verify": "human_intervention",  # 人机验证：暂停等待人工
+            "end": END,                         # 任务完成或熔断：结束图循环
+        },
+    )
+
+    #人工验证结束后：通过则回 Planner 重新规划剩余步骤，超时熔断则结束
+    workflow.add_conditional_edges(
+        "human_intervention",
+        human_router,
+        {
+            "replan": "planner",
+            "end": END,
         },
     )
 

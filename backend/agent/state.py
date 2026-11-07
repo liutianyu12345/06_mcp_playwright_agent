@@ -10,6 +10,7 @@ class AgentState(TypedDict):
     last_action_result: str #上一步MCP工具返回的结果或报错信息
     error_count: int #连续失败次数（防止死循环）
     needs_replan: bool #Critic 判定是否需要打回 Planner 重规划
+    needs_human_verify: bool #页面命中人机验证，需要暂停并交给人工处理
     is_completed: bool #整个任务是否已完成
     final_answer: str #最终汇报给用户的采集结果
     thought_trace: Annotated[List[str],operator.add] #累加记录每一步的思考链（CoT）供前端展示

@@ -56,17 +56,31 @@ async def stream_agent_task(goal:str,session_id:str = "default_session"):
                 "last_action_result": "",
                 "error_count": 0,
                 "needs_replan": False,
+                "needs_human_verify": False,
                 "is_completed": False,
                 "final_answer": "",
                 "thought_trace": [],
             }
-            # astream(stream_mode = "updates")会在每个节点执行完立刻yield 更新后的状态
+            # 同时订阅 updates（节点完成）与 custom（人工验证等待进度等即时事件）
             try:
-                async for event in agent_app.astream(
+                async for mode, event in agent_app.astream(
                     initial_state,
                     config=config,
-                    stream_mode="updates",
+                    stream_mode=["updates", "custom"],
                 ):
+                    if mode == "custom":
+                        # human_intervention 节点通过 get_stream_writer() 主动推送的事件
+                        payload = {
+                            "node": event.get("node", "human_intervention"),
+                            "thought": event.get("thought", ""),
+                            "plan_steps": None,
+                            "screenshot": event.get("screenshot"),
+                            "final_answer": None,
+                            "human_verification": event.get("human_verification"),
+                        }
+                        yield f"data: {json.dumps(payload,ensure_ascii=False)}\n\n"
+                        continue
+
                     for node_name,node_output in event.items():
                         payload = {
                             "node": node_name,
@@ -74,6 +88,8 @@ async def stream_agent_task(goal:str,session_id:str = "default_session"):
                             "plan_steps": node_output.get("plan_steps"),
                             "screenshot": node_output.get("screenshot_b64"),
                             "final_answer": node_output.get("final_answer"),
+                            # 命中人机验证时前端展示「等待人工」提示，通过后自动收起
+                            "human_verification": node_output.get("needs_human_verify"),
                         }
                         #按照标准SSE格式（data：...}\n\n）推送给前端
                         yield f"data: {json.dumps(payload,ensure_ascii=False)}\n\n"

@@ -84,11 +84,89 @@
 
         distilledItems.push(desc);
     }
+    // 8. 人机验证（CAPTCHA）识别：reCAPTCHA / hCaptcha / Cloudflare Turnstile / 挑战页 / 滑块
+    //    只做信号收集，不做任何绕过；命中后由 Agent 暂停并交给人工处理
+    const verifyReasons = [];
+    const addVerifyReason = (reason) => {
+        if (reason && !verifyReasons.includes(reason)) verifyReasons.push(reason);
+    };
+
+    // 8.1 验证 iframe（跨域，MCP 无法点击，必须人工操作）
+    //     覆盖 reCAPTCHA / hCaptcha / Turnstile / Arkose / GeeTest / Cloudflare / Bing Turing 挑战页
+    for (const frame of document.querySelectorAll('iframe')) {
+        const src = frame.getAttribute('src') || '';
+        const title = frame.getAttribute('title') || '';
+        if (/recaptcha|hcaptcha|turnstile|challenges\.cloudflare\.com|arkose|funcaptcha|geetest|captcha|turing\/|challengepage|\/challenge/i.test(src)
+            || /captcha|challenge|验证/i.test(title)) {
+            addVerifyReason(`检测到验证 iframe: ${src.slice(0, 100) || title}`);
+        }
+    }
+
+    // 8.2 常见验证容器 / 站点密钥元素
+    //     #hip / #b_captcha 是 Bing 的 Human Interactive Proof 挑战容器
+    const verifySelectors = [
+        '.g-recaptcha', '.h-captcha', '.cf-turnstile',
+        '#challenge-form', '#cf-challenge-running', '#captcha',
+        '#b_captcha', '#hip', '[data-sitekey]',
+        'iframe[src*="captcha" i]', 'iframe[src*="turing" i]',
+        'iframe[id*="captcha" i]', 'iframe[id*="challenge" i]'
+    ];
+    for (const sel of verifySelectors) {
+        if (document.querySelector(sel)) {
+            addVerifyReason(`检测到验证组件: ${sel}`);
+            break;
+        }
+    }
+
+    // 8.3 页面标题（Cloudflare "Just a moment..." / Bing "最后一步" 等挑战页）
+    if (/just a moment|attention required|请稍候|人机验证|captcha|最后一步|请解决|verify you are human/i.test(document.title || '')) {
+        addVerifyReason(`页面标题疑似验证页: ${document.title}`);
+    }
+
+    // 8.4 当前 URL 直接命中挑战页路径（Bing: /turing/captcha/...）
+    if (/turing\/captcha|challengepage|\/captcha\/|arkose|funcaptcha/i.test(window.location.href)) {
+        addVerifyReason(`页面 URL 命中验证路径: ${window.location.href.slice(0, 100)}`);
+    }
+
+    // 8.5 页面正文中的强提示词（避免"请输入验证码"这类普通表单误判）
+    const strongVerifyPatterns = [
+        /verify (you are|that you are) (a )?human/i,
+        /are you (a )?robot/i,
+        /i'?m not a robot/i,
+        /security check/i,
+        /checking your browser/i,
+        /确认您是真人/i,
+        /请完成(以下)?验证/i,
+        /人机验证/i,
+        /拖动滑块/i,
+        /请解决以下难题/i,
+        /solve (this|the following) (puzzle|challenge)/i,
+        /complete (the|this) (challenge|security check)/i,
+        /unusual (traffic|activity)/i,
+        /automated (requests|queries)/i,
+        /异常流量/i,
+        /访问(过于)?频繁/i,
+        /请求过于频繁/i
+    ];
+    const bodyText = (document.body ? document.body.innerText : '').slice(0, 4000);
+    if (bodyText) {
+        for (const pattern of strongVerifyPatterns) {
+            if (pattern.test(bodyText)) {
+                addVerifyReason(`页面正文命中验证提示: ${pattern.source}`);
+                break;
+            }
+        }
+    }
+
     // 返回精简后的页面摘要，供大模型阅读
     return {
         url: window.location.href,
         title: document.title,
         interactiveCount: distilledItems.length,
-        distilledDOM: distilledItems.join('\n')
+        distilledDOM: distilledItems.join('\n'),
+        verification: {
+            detected: verifyReasons.length > 0,
+            reasons: verifyReasons
+        }
     };
 })();
