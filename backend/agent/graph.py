@@ -85,7 +85,8 @@ async def actor_node(state: AgentState) -> dict:
         "你是一个精准的网页执行智能体(Actor)。\n"
         "请仔细观察当前网页的 Set-of-Mark 简化 DOM 列表（形如 [编号] <标签>文字</标签>），"
         "选择一个最合适的工具完成【当前子目标】。\n"
-        "注意：点击或输入时，必须传入方括号内的数字编号 som_id！"
+        "注意：点击或输入时，必须传入方括号内的数字编号 som_id！\n"
+        "必须调用工具，禁止只回复文字说明；即使当前子目标只是查看或汇报，也要先调用工具确认页面状态。"
     )
     user_prompt = (
         f"【总目标】：{state['user_goal']}\n"
@@ -137,7 +138,8 @@ async def critic_node(state: AgentState) -> dict:
     steps = state["plan_steps"]
 
     #情况A：检测到工具执行报错（例如弹窗遮挡、超时、选择器失效）
-    if "❌" in last_res:
+    #“未调用工具”说明模型跳过了页面操作，同样视为失败，避免子目标被空转判为通过
+    if "❌" in last_res or last_res == "未调用工具":
         err_cnt = state.get("error_count", 0) + 1
         thought = f"🔍 [Critic] 检测到动作执行异常（第 {err_cnt} 次），准备回退至 Planner 重新规划路径！"
         return {
