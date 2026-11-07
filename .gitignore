@@ -1,6 +1,3 @@
-# 项目手册（按需保留；若不希望忽略 README，请删除本行）
-/README.md
-
 # ===== Python =====
 __pycache__/
 *.py[cod]

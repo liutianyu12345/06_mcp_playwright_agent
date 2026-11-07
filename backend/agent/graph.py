@@ -1,7 +1,9 @@
 import json
+import os
+from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage,HumanMessage
-from langgraph import StateGraph,END
+from langgraph.graph import StateGraph,END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from backend.agent.state import AgentState
@@ -13,12 +15,15 @@ from backend.mcp_server.browser_mcp_server import (
     browser_screenshot,
 )
 
+#读取项目根目录下的 .env
+load_dotenv()
+
 #初始化支持Function Calling 的大模型
 llm = ChatOpenAI(
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url=os.getenv("BASE_URL"),
-    model_name=os.getenv("MODEL_NAME"),
-    temperature=float(os.getenv("LLM_TEMPERATURE")),
+    api_key=os.getenv("DEEPSEEK_API_KEY") or None,
+    base_url=os.getenv("BASE_URL") or None,
+    model=os.getenv("MODEL_NAME", "deepseek-flash"),
+    temperature=float(os.getenv("LLM_TEMPERATURE", "0")),
 )
 #将MCP工具绑定给Actor 大模型
 MCP_TOOLS = {
@@ -102,8 +107,11 @@ async def actor_node(state: AgentState) -> dict:
         tool_args = tool_call["args"]
         thought = f"🤖 [Actor] 决定调用 MCP 工具 `{tool_name}`，参数：{tool_args}"
 
-        tool_fn = MCP_TOOLS[tool_name]
-        action_result = await tool_fn(**tool_args)
+        tool_fn = MCP_TOOLS.get(tool_name)
+        if tool_fn is None:
+            action_result = f"❌ 模型选择了不存在的工具 `{tool_name}`"
+        else:
+            action_result = await tool_fn(**tool_args)
 
     #动作执行后，顺手抓一张带红框标记的实时截图
     screenshot = await browser_screenshot()
@@ -179,7 +187,7 @@ def critic_router(state: AgentState) -> str:
     return "next_action"
 
 # ==================== 构建并编译 StateGraph ====================
-def build_browser_agent_graph():
+def build_browser_agent_graph(checkpointer: AsyncSqliteSaver):
     workflow = StateGraph(AgentState)
 
     #注册三个核心智能体节点
@@ -193,7 +201,7 @@ def build_browser_agent_graph():
     workflow.add_edge("actor", "critic")
 
     #设置Critic的条件边（自愈循环的关键）
-    workflow.add_conditional_edge(
+    workflow.add_conditional_edges(
         "critic",
         critic_router,
         {

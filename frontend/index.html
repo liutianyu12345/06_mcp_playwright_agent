@@ -1,0 +1,137 @@
+<!-- frontend/index.html -->
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>MCP + Playwright GUI Agent 实时监控台</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
+    .container { display: grid; grid-template-columns: 1fr 1.2fr; gap: 20px; max-width: 1400px; margin: auto; }
+    .card { background: #1e293b; border-radius: 10px; padding: 16px; border: 1px solid #334155; }
+    input { width: 70%; padding: 10px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #fff; }
+    button { padding: 10px 18px; background: #3b82f6; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    .log-item { padding: 8px 12px; margin: 8px 0; background: #0f172a; border-left: 4px solid #3b82f6; border-radius: 4px; font-size: 14px; }
+    .log-list { max-height: 380px; overflow-y: auto; }
+    .empty { color: #64748b; font-size: 14px; padding: 12px 0; }
+    .status { text-align: center; margin-bottom: 12px; font-size: 13px; color: #94a3b8; }
+    .plan { margin-top: 12px; padding: 10px 12px; background: #0f172a; border: 1px dashed #334155; border-radius: 6px; }
+    .plan ol { margin: 6px 0 0 18px; padding: 0; font-size: 13px; color: #cbd5e1; }
+    .btn-stop { background: #ef4444; margin-left: 8px; }
+    img { width: 100%; border-radius: 8px; border: 1px solid #475569; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h2 style="text-align:center;">🤖 MCP + Playwright 浏览器自动化 Agent 监控中心</h2>
+    <div style="text-align:center; margin-bottom: 12px;">
+      <input v-model="goal" @keyup.enter="startTask" placeholder="输入自然语言指令，例如：打开 https://www.bing.com 搜索 LangGraph 并总结前两条结果" />
+      <button @click="startTask" :disabled="running">{{ running ? '执行中...' : '启动 Agent' }}</button>
+      <button v-if="running" class="btn-stop" @click="stopTask">停止</button>
+    </div>
+    <div class="status">当前会话：{{ sessionId || '未开始' }}</div>
+
+    <div class="container">
+      <!-- 左侧：Planner-Actor-Critic 实时思考链 -->
+      <div class="card">
+        <h3>🧠 实时思考链 (CoT) & 节点流转</h3>
+        <div class="log-list" ref="logBox">
+          <div v-for="(log, idx) in logs" :key="idx" class="log-item">
+            <strong>[{{ (log.node || 'system').toUpperCase() }}]</strong> {{ log.thought }}
+          </div>
+          <p v-if="!logs.length" class="empty">尚未开始，点击上方「启动 Agent」查看实时思考链。</p>
+        </div>
+        <div v-if="planSteps.length" class="plan">
+          <strong>📋 当前计划</strong>
+          <ol>
+            <li v-for="(step, idx) in planSteps" :key="idx">{{ step }}</li>
+          </ol>
+        </div>
+        <div v-if="finalAnswer" style="margin-top:16px; padding:12px; background:#065f46; border-radius:6px;">
+          <strong>🎯 最终结果：</strong> {{ finalAnswer }}
+        </div>
+      </div>
+
+      <!-- 右侧：带 Set-of-Mark 红框标记的浏览器实时快照 -->
+      <div class="card">
+        <h3>🌐 浏览器实时状态快照 (Set-of-Mark)</h3>
+        <img v-if="screenshot" :src="'data:image/jpeg;base64,' + screenshot" alt="浏览器实时截图" />
+        <p v-else style="color:#64748b;">等待浏览器启动并注入 DOM 蒸馏脚本...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const { createApp, ref, nextTick } = Vue;
+    // 后端地址：若前端由后端同源托管，可改成 ""
+    const API_BASE = "http://localhost:8000";
+
+    const newSessionId = () =>
+      crypto.randomUUID ? crypto.randomUUID() : `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+
+    createApp({
+      setup() {
+        const goal = ref("打开 https://www.bing.com 搜索 Playwright MCP 并汇报页面标题");
+        const logs = ref([]);
+        const screenshot = ref(null);
+        const finalAnswer = ref("");
+        const running = ref(false);
+        const planSteps = ref([]);
+        const sessionId = ref("");
+        const logBox = ref(null);
+        let evtSource = null;
+
+        const pushLog = (node, thought) => {
+          if (!thought) return;
+          logs.value.push({ node: node, thought: thought });
+          nextTick(() => {
+            if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
+          });
+        };
+
+        const stopTask = () => {
+          if (evtSource) {
+            evtSource.close();
+            evtSource = null;
+          }
+          running.value = false;
+        };
+
+        const startTask = () => {
+          stopTask();
+          logs.value = [];
+          finalAnswer.value = "";
+          screenshot.value = null;
+          planSteps.value = [];
+          running.value = true;
+          sessionId.value = newSessionId();
+
+          const url = `${API_BASE}/api/agent/stream?goal=${encodeURIComponent(goal.value)}&session_id=${encodeURIComponent(sessionId.value)}`;
+          evtSource = new EventSource(url);
+
+          evtSource.onmessage = (e) => {
+            const data = JSON.parse(e.data);
+            if (Array.isArray(data.plan_steps)) planSteps.value = data.plan_steps;
+            if (data.screenshot) screenshot.value = data.screenshot;
+            if (data.thought) pushLog(data.node || "system", data.thought);
+            if (data.final_answer) {
+              finalAnswer.value = data.final_answer;
+              stopTask();
+            }
+          };
+          evtSource.onerror = () => {
+            if (!running.value) return;
+            const hasErrorLog = logs.value.some((item) => item.node === "error");
+            if (!finalAnswer.value && !hasErrorLog) {
+              pushLog("system", "⚠️ 连接中断或任务被熔断终止，未生成最终结果");
+            }
+            stopTask();
+          };
+        };
+
+        return { goal, logs, screenshot, finalAnswer, running, planSteps, sessionId, logBox, startTask, stopTask };
+      }
+    }).mount("#app");
+  </script>
+</body>
+</html>
